@@ -1,0 +1,765 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Radio LOS</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<style>
+body { margin:0; font-family:sans-serif; }
+
+#map { position:absolute; top:0; bottom:20%; width:100%; }
+
+#profile {
+position:absolute;
+bottom:0;
+height:20%;
+width:100%;
+background:#fff;
+border-top:2px solid #333;
+}
+
+.controls {
+position:absolute;
+top:60px;
+left:10px;
+background:white;
+padding:10px;
+z-index:1000;
+border-radius:8px;
+font-size:13px;
+}
+
+.layers {
+position:absolute;
+top:10px;
+right:10px;
+background:white;
+padding:8px;
+border-radius:8px;
+z-index:1000;
+}
+</style>
+</head>
+
+<body>
+
+<div class="controls">
+<b>Налаштування радіо видимості</b><br><br>
+
+Радіус видимості <input id="radius" type="number" value="20"> км<br>
+Висота антени <input id="height" type="number" value="8"> м<br>
+Висота БПЛА <input id="uav_height" type="number" value="20"> м<br>
+
+<label><input type="checkbox" id="high_precision"> Підвищена точність (x2)</label><br>
+<label><input type="checkbox" id="show_azimuth_line" checked> Відображати лінію азимута</label><br>
+<label id="lbl_earth_curve" style="padding: 2px 5px; border-radius: 4px; display: inline-block; margin-bottom: 2px; transition: background-color 0.2s;"><input type="checkbox" id="earth_curve"> Враховувати кривизну Землі</label><br>
+
+<div id="valley_wrapper" style="display:none; padding-left: 20px; margin-bottom: 4px;">
+    <label><input type="checkbox" id="consider_valleys"> Враховувати долини</label>
+</div>
+
+<label id="lbl_fresnel" style="padding: 2px 5px; border-radius: 4px; display: inline-block; margin-bottom: 2px; transition: background-color 0.2s;"><input type="checkbox" id="fresnel"> Враховувати зону Френеля</label><br>
+<label><input type="checkbox" id="elev_map"> Карта висот</label><br>
+
+<div id="elev_opacity_wrapper" style="display:none; padding-left: 15px; padding-top: 5px;">
+    Прозорість: <input type="range" id="elev_opacity" min="0" max="100" value="20"> <span id="opacity_val">20%</span>
+</div>
+
+<hr>
+<div id="centerElevation"></div>
+<div id="azimuth"></div>
+<div id="mouseElevation"></div>
+<div id="distanceInfo"></div>
+</div>
+
+<div class="layers">
+<label><input type="radio" name="map" value="sat" checked> Супутник</label><br>
+<label><input type="radio" name="map" value="osm"> OSM</label>
+</div>
+
+<div id="map"></div>
+<canvas id="profile"></canvas>
+
+<script>
+
+// Функція для оновлення кольору фону галочок та видимості меню долин
+function updateCheckboxColors() {
+    const curveLabel = document.getElementById('lbl_earth_curve');
+    const fresnelLabel = document.getElementById('lbl_fresnel');
+    const valleyWrapper = document.getElementById('valley_wrapper');
+    const isCurveChecked = document.getElementById('earth_curve').checked;
+    
+    if (isCurveChecked) {
+        curveLabel.style.backgroundColor = 'rgba(0, 230, 230, 0.4)';
+        valleyWrapper.style.display = 'block';
+    } else {
+        curveLabel.style.backgroundColor = 'transparent';
+        valleyWrapper.style.display = 'none';
+    }
+    
+    if (document.getElementById('fresnel').checked) {
+        fresnelLabel.style.backgroundColor = 'rgba(255, 190, 0, 0.5)';
+    } else {
+        fresnelLabel.style.backgroundColor = 'transparent';
+    }
+}
+
+// Виклик при завантаженні сторінки
+updateCheckboxColors();
+
+// MAP
+const map = L.map('map').setView([48.47,37.08], 11);
+
+const baseLayers = {
+sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19}),
+osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+};
+
+const labels = L.tileLayer(
+'https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'
+);
+
+baseLayers.sat.addTo(map);
+labels.addTo(map);
+
+document.querySelectorAll('[name="map"]').forEach(el=>{
+el.onchange = ()=>{
+Object.values(baseLayers).forEach(l=>map.removeLayer(l));
+baseLayers[el.value].addTo(map);
+labels.addTo(map);
+};
+});
+
+// DEM & CACHE OPTIMIZATION
+const DEM_ZOOM = 12;
+const demCache = new Map();
+const pendingTiles = new Map();
+
+// Функція для завантаження окремого тайлу
+async function preloadTile(x, y) {
+    const key = `${x}_${y}`;
+    if (demCache.has(key)) return;
+    if (pendingTiles.has(key)) return pendingTiles.get(key);
+    
+    const p = new Promise(resolve => {
+        const img = new Image();
+        img.crossOrigin = "Anonymous";
+        img.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = 256; c.height = 256;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0);
+            demCache.set(key, ctx.getImageData(0, 0, 256, 256).data);
+            resolve();
+        };
+        img.onerror = () => {
+            const c = document.createElement('canvas');
+            c.width = 256; c.height = 256;
+            demCache.set(key, c.getContext('2d').getImageData(0, 0, 256, 256).data);
+            resolve();
+        };
+        img.src = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${DEM_ZOOM}/${x}/${y}.png`;
+    });
+    pendingTiles.set(key, p);
+    return p;
+}
+
+// Завантажити всі тайли для заданого радіусу
+async function preloadArea(lat, lng, r) {
+    const z = DEM_ZOOM;
+    const n = Math.pow(2, z);
+    const lat_margin = r / 111.32;
+    const lng_margin = r / (111.32 * Math.cos(lat * Math.PI / 180));
+    
+    const x_min = Math.floor(((lng - lng_margin) + 180) / 360 * n);
+    const x_max = Math.floor(((lng + lng_margin) + 180) / 360 * n);
+    const y_min = Math.floor((1 - Math.log(Math.tan((lat + lat_margin) * Math.PI / 180) + 1 / Math.cos((lat + lat_margin) * Math.PI / 180)) / Math.PI) / 2 * n);
+    const y_max = Math.floor((1 - Math.log(Math.tan((lat - lat_margin) * Math.PI / 180) + 1 / Math.cos((lat - lat_margin) * Math.PI / 180)) / Math.PI) / 2 * n);
+
+    const promises = [];
+    for(let x = x_min; x <= x_max; x++){
+        for(let y = y_min; y <= y_max; y++){
+            promises.push(preloadTile(x, y));
+        }
+    }
+    await Promise.all(promises);
+}
+
+// Синхронне отримання висоти (для циклів та теплової карти)
+function getElevationSync(lat, lng) {
+    const z = DEM_ZOOM;
+    const n = Math.pow(2, z);
+    const x = Math.floor((lng + 180) / 360 * n);
+    const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n);
+    const key = `${x}_${y}`;
+    const data = demCache.get(key);
+    
+    if (!data) return 0;
+    
+    const px = Math.floor(((lng + 180) / 360 * n - x) * 256);
+    const py = Math.floor(((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n - y) * 256);
+    const i = (py * 256 + px) * 4;
+    return (data[i] * 256 + data[i + 1] + data[i + 2] / 256) - 32768;
+}
+
+// Асинхронна версія для сумісності з подіями миші
+async function getElevation(lat, lng) {
+    const z = DEM_ZOOM;
+    const n = Math.pow(2, z);
+    const x = Math.floor((lng + 180) / 360 * n);
+    const y = Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * n);
+    await preloadTile(x, y);
+    return getElevationSync(lat, lng);
+}
+
+// геометрія
+function dest(lat,lng,d,br){
+const R=6371;
+const b=br*Math.PI/180;
+const lat1=lat*Math.PI/180;
+const lng1=lng*Math.PI/180;
+
+const lat2=Math.asin(Math.sin(lat1)*Math.cos(d/R)+Math.cos(lat1)*Math.sin(d/R)*Math.cos(b));
+const lng2=lng1+Math.atan2(Math.sin(b)*Math.sin(d/R)*Math.cos(lat1),Math.cos(d/R)-Math.sin(lat1)*Math.sin(lat2));
+
+return [lat2*180/Math.PI,lng2*180/Math.PI];
+}
+
+function bearing(lat1,lng1,lat2,lng2){
+const φ1=lat1*Math.PI/180;
+const φ2=lat2*Math.PI/180;
+const Δλ=(lng2-lng1)*Math.PI/180;
+
+const y=Math.sin(Δλ)*Math.cos(φ2);
+const x=Math.cos(φ1)*Math.sin(φ2)-Math.sin(φ1)*Math.cos(φ2)*Math.cos(Δλ);
+
+return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+
+// HSL to RGB для карти висот
+function hslToRgb(h, s, l) {
+    let r, g, b;
+    if (s === 0) {
+        r = g = b = l;
+    } else {
+        const hue2rgb = (p, q, t) => {
+            if (t < 0) t += 1;
+            if (t > 1) t -= 1;
+            if (t < 1/6) return p + (q - p) * 6 * t;
+            if (t < 1/2) return q;
+            if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+            return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        r = hue2rgb(p, q, h + 1/3);
+        g = hue2rgb(p, q, h);
+        b = hue2rgb(p, q, h - 1/3);
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+// LOS & КАРТА ВИСОТ
+let marker;
+let polygons=[];
+let azLine;
+let elevOverlay = null;
+
+async function calculate(){
+
+if(!marker) return;
+
+polygons.forEach(p=>map.removeLayer(p));
+polygons=[];
+
+const c=marker.getLatLng();
+const r=+radius.value;
+const ant=+height.value;
+const uav=+uav_height.value;
+
+const useCurve = earth_curve.checked;
+const useFresnel = fresnel.checked;
+const useHighPrecision = document.getElementById('high_precision').checked;
+const useValleys = document.getElementById('consider_valleys').checked;
+
+const freqGHz = 2.4;
+
+// 1. Попередньо завантажуємо всі висотні тайли в радіусі
+await preloadArea(c.lat, c.lng, r);
+
+const base = getElevationSync(c.lat,c.lng);
+const centerEle = base + ant;
+
+const rangeStep = 0.3;
+// Зміна кроку азимута залежно від галочки "Підвищена точність"
+const azimuthStep = useHighPrecision ? 0.25 : 0.5;
+
+// 2. Малюємо теплову карту (якщо ввімкнено)
+drawHeatmap(c, r);
+
+// 3. Розраховуємо сектори видимості (тепер працює миттєво)
+for(let a=0;a<360;a+=azimuthStep){
+
+// Визначаємо висоту на краю радіусу для правильного прорахунку прямої видимості до цілі
+const [edgeLat, edgeLng] = dest(c.lat, c.lng, r, a);
+let edgeTerrain = getElevationSync(edgeLat, edgeLng);
+if(useCurve) {
+    edgeTerrain -= (r*r)/(2*6371000);
+}
+const edgeUavHeight = edgeTerrain + uav;
+
+for(let d=rangeStep;d<=r;d+=rangeStep){
+const [lat,lng]=dest(c.lat,c.lng,d,a);
+let terrain = getElevationSync(lat,lng); 
+
+if(useCurve){
+terrain -= (d*d)/(2*6371000);
+}
+
+// Правильна інтерполяція висоти променя нахиленого до рельєфу цілі
+const losHeight = centerEle + (d/r) * (edgeUavHeight - centerEle);
+
+let horizonLimit = Infinity;
+if(useCurve){
+    // Використання галочки "Враховувати долини"
+    let uavEff = useValleys ? Math.max(0, uav + (terrain - base)) : uav;
+    horizonLimit = 4 * (Math.sqrt(ant) + Math.sqrt(uavEff));
+}
+
+let fres=0;
+if(useFresnel){
+const d1=d*1000;
+const d2=(r-d)*1000;
+const lambda=0.3/freqGHz;
+fres=Math.sqrt((lambda*d1*d2)/(d1+d2));
+}
+
+const isLOSBlocked = terrain > losHeight;
+const isFresnelBlocked = useFresnel && (terrain + fres > losHeight);
+const isHorizonBlocked = useCurve && (d > horizonLimit);
+
+if (isLOSBlocked) {
+    const s1=dest(c.lat,c.lng,d,a);
+    const e1=dest(c.lat,c.lng,r,a);
+    const e2=dest(c.lat,c.lng,r,a+azimuthStep);
+    const s2=dest(c.lat,c.lng,d,a+azimuthStep);
+
+    polygons.push(L.polygon([s1,e1,e2,s2],{
+        color:'red',
+        fillColor:'red',
+        fillOpacity:0.3,
+        weight:0
+    }).addTo(map));
+    break; 
+} 
+else if (isFresnelBlocked) {
+    const s1=dest(c.lat,c.lng,d,a);
+    const e1=dest(c.lat,c.lng,d+rangeStep,a);
+    const e2=dest(c.lat,c.lng,d+rangeStep,a+azimuthStep);
+    const s2=dest(c.lat,c.lng,d,a+azimuthStep);
+
+    polygons.push(L.polygon([s1,e1,e2,s2],{
+        color:'orange',
+        fillColor:'orange',
+        fillOpacity:0.45, 
+        weight:0
+    }).addTo(map));
+}
+else if (isHorizonBlocked) {
+    const s1=dest(c.lat,c.lng,d,a);
+    const e1=dest(c.lat,c.lng,d+rangeStep,a);
+    const e2=dest(c.lat,c.lng,d+rangeStep,a+azimuthStep);
+    const s2=dest(c.lat,c.lng,d,a+azimuthStep);
+
+    polygons.push(L.polygon([s1,e1,e2,s2],{
+        color:'cyan',
+        fillColor:'cyan',
+        fillOpacity:0.25,
+        weight:0
+    }).addTo(map));
+}
+}
+}
+}
+
+// Функція малювання карти висот
+function drawHeatmap(center, radiusKm) {
+    const isEnabled = document.getElementById('elev_map').checked;
+    const opacity = document.getElementById('elev_opacity').value / 100;
+    
+    if (!isEnabled) {
+        if (elevOverlay) map.removeLayer(elevOverlay);
+        return;
+    }
+
+    const res = 150; // Роздільна здатність карти (пікселів)
+    const lat_margin = radiusKm / 111.32;
+    const lng_margin = radiusKm / (111.32 * Math.cos(center.lat * Math.PI / 180));
+    
+    let min_e = Infinity;
+    let max_e = -Infinity;
+    const grid = new Float32Array(res * res);
+    
+    // Перший прохід: збираємо висоти та знаходимо мінімум/максимум
+    for (let i = 0; i < res; i++) {
+        for (let j = 0; j < res; j++) {
+            const cur_lat = center.lat + lat_margin - (i / (res - 1)) * (2 * lat_margin);
+            const cur_lng = center.lng - lng_margin + (j / (res - 1)) * (2 * lng_margin);
+            
+            const dy = (cur_lat - center.lat) * 111.32;
+            const dx = (cur_lng - center.lng) * 111.32 * Math.cos(center.lat * Math.PI / 180);
+            const d = Math.sqrt(dx*dx + dy*dy);
+
+            if (d <= radiusKm) {
+                const e = getElevationSync(cur_lat, cur_lng);
+                grid[i * res + j] = e;
+                if (e < min_e) min_e = e;
+                if (e > max_e) max_e = e;
+            } else {
+                grid[i * res + j] = -99999;
+            }
+        }
+    }
+
+    // Другий прохід: малюємо пікселі
+    const imgData = new Uint8ClampedArray(res * res * 4);
+    for (let i = 0; i < res; i++) {
+        for (let j = 0; j < res; j++) {
+            const e = grid[i * res + j];
+            const idx = (i * res + j) * 4;
+            if (e === -99999) {
+                imgData[idx + 3] = 0; // Прозорий за межами радіусу
+            } else {
+                // Нормалізація від 0 (мінімум) до 1 (максимум)
+                let norm = (e - min_e) / (max_e - min_e || 1);
+                // 120 = Зелений, 0 = Червоний
+                const h = (1 - norm) * 120; 
+                const rgb = hslToRgb(h / 360, 1, 0.5);
+                imgData[idx] = rgb[0];
+                imgData[idx + 1] = rgb[1];
+                imgData[idx + 2] = rgb[2];
+                imgData[idx + 3] = 255; 
+            }
+        }
+    }
+
+    const ec = document.createElement('canvas');
+    ec.width = res;
+    ec.height = res;
+    const ectx = ec.getContext('2d');
+    const iData = ectx.createImageData(res, res);
+    iData.data.set(imgData);
+    ectx.putImageData(iData, 0, 0);
+
+    const bounds = [
+        [center.lat - lat_margin, center.lng - lng_margin], 
+        [center.lat + lat_margin, center.lng + lng_margin]  
+    ];
+
+    if (!elevOverlay) {
+        elevOverlay = L.imageOverlay(ec.toDataURL(), bounds, { opacity: opacity }).addTo(map);
+    } else {
+        elevOverlay.setUrl(ec.toDataURL());
+        elevOverlay.setBounds(bounds);
+        elevOverlay.setOpacity(opacity);
+        if (!map.hasLayer(elevOverlay)) elevOverlay.addTo(map);
+    }
+    
+    // Опускаємо карту висот під полігони
+    elevOverlay.bringToBack();
+}
+
+// PROFILE
+const canvas=document.getElementById('profile');
+const ctx=canvas.getContext('2d');
+
+map.on('mousemove', async e=>{
+
+if(marker){
+const c = marker.getLatLng();
+if(azLine) map.removeLayer(azLine);
+
+// Відображаємо синю лінію тільки якщо галочка увімкнена
+if(document.getElementById('show_azimuth_line').checked) {
+    azLine = L.polyline([c, e.latlng], {color:'blue',weight:2}).addTo(map);
+}
+
+const az = bearing(c.lat,c.lng,e.latlng.lat,e.latlng.lng);
+document.getElementById('azimuth').innerText = "Азимут: " + az.toFixed(1) + "°";
+
+const currentElev = await getElevation(e.latlng.lat, e.latlng.lng);
+const centerElev = await getElevation(c.lat, c.lng);
+document.getElementById('centerElevation').innerText = "Висота центральної точки: " + Math.round(centerElev) + " м";
+document.getElementById('mouseElevation').innerText = "Поточна висота: " + Math.round(currentElev) + " м";
+
+// Розрахунок відстані до курсора миші (кілометри + сотні метрів)
+const distKm = map.distance(c, e.latlng) / 1000;
+document.getElementById('distanceInfo').innerText = "Відстань: " + distKm.toFixed(1) + " км";
+}
+
+if(!marker) return;
+
+canvas.width=canvas.clientWidth;
+canvas.height=canvas.clientHeight;
+const padding = {top:5,bottom:30,left:40,right:40};
+
+const c=marker.getLatLng();
+const r=+radius.value;
+const ant=+height.value;
+const uav=+uav_height.value;
+const isFresnelActive = document.getElementById('fresnel').checked;
+
+const az = bearing(c.lat,c.lng,e.latlng.lat,e.latlng.lng);
+const samples=120;
+let elev=[];
+
+for(let i=0;i<=samples;i++){
+const d=r*(i/samples);
+const [lat,lng]=dest(c.lat,c.lng,d,az);
+elev.push(await getElevation(lat,lng));
+}
+
+let min=Math.floor(Math.min(...elev)/10)*10;
+let max=Math.ceil(Math.max(...elev)/10)*10;
+
+let maxFresnel = 0;
+if(isFresnelActive){
+    const dMid = (r*1000)/2;
+    maxFresnel = (Math.sqrt(((0.3/2.4) * dMid * dMid) / (r*1000))) * 0.5; 
+}
+
+max = Math.max(max, elev[0] + ant + maxFresnel, elev[samples] + uav + maxFresnel);
+const range = max - min;
+let step = 10;
+while(range / step > 5) step *= 2;
+const start = Math.ceil(min / step) * step;
+
+const getX = d => padding.left + (d/r)*(canvas.width - padding.left - padding.right);
+const getY = h => canvas.height - padding.bottom - (h-min)/(max-min)*(canvas.height - padding.top - padding.bottom);
+
+ctx.clearRect(0,0,canvas.width,canvas.height);
+
+// Створення градієнта для штриховки під рельєфом (значно червоніший зверху)
+const groundGradient = ctx.createLinearGradient(0, getY(max), 0, getY(min));
+groundGradient.addColorStop(1, 'rgba(0, 180, 0, 0.2)');   // Зелений знизу
+groundGradient.addColorStop(0.5, 'rgba(255, 100, 0, 0.4)'); // Плавний перехід у помаранчевий
+groundGradient.addColorStop(0, 'rgba(255, 0, 0, 0.6)');     // Насичений червоний зверху
+
+// Заливка градієнтом області під рельєфом
+ctx.beginPath();
+ctx.moveTo(getX(0), getY(min)); // Нижня ліва точка
+ctx.lineTo(getX(0), getY(elev[0])); // Перша точка рельєфу
+elev.forEach((v,i)=>{
+    ctx.lineTo(getX(r*(i/samples)), getY(v));
+});
+ctx.lineTo(getX(r), getY(min)); // Нижня права точка
+ctx.closePath();
+ctx.fillStyle = groundGradient;
+ctx.fill();
+
+// Скидання кольору тексту на чорний для малювання осей
+ctx.fillStyle = 'black';
+ctx.font = '12px sans-serif';
+ctx.strokeRect(padding.left, padding.top, canvas.width - padding.left - padding.right, canvas.height - padding.top - padding.bottom);
+
+for(let h = start; h <= max; h += step){
+let y=getY(h);
+ctx.beginPath();
+ctx.moveTo(padding.left,y);
+ctx.lineTo(canvas.width-padding.right,y);
+ctx.stroke();
+ctx.fillText(h+' м',5,y-2);
+ctx.fillText(h+' м',canvas.width-35,y-2);
+}
+
+for(let i=0;i<=10;i++){
+let d=(i/10)*r;
+let x=getX(d);
+ctx.beginPath();
+ctx.moveTo(x,padding.top);
+ctx.lineTo(x,canvas.height-padding.bottom);
+ctx.stroke();
+ctx.fillText(Math.round(d)+' км',x-10,canvas.height-2);
+}
+
+// рельєф (чорна лінія поверх штриховки)
+ctx.beginPath();
+ctx.strokeStyle='black';
+elev.forEach((v,i)=>{
+let x=getX(r*(i/samples));
+let y=getY(v);
+if(i==0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+});
+ctx.stroke();
+
+// LOS
+ctx.beginPath();
+ctx.strokeStyle='blue';
+ctx.moveTo(getX(0),getY(elev[0]+ant));
+ctx.lineTo(getX(r),getY(elev[samples]+uav));
+ctx.stroke();
+
+// Зона Френеля на графіку
+if(isFresnelActive){
+    const freqGHz = 2.4;
+    const lambda = 0.3 / freqGHz;
+    ctx.beginPath();
+    ctx.setLineDash([10, 5, 2, 5]); 
+    ctx.strokeStyle = 'blue';
+
+    for(let i=0; i<=samples; i++){
+        const d = r * (i/samples);
+        const d1 = d * 1000;
+        const d2 = (r - d) * 1000;
+        let fres = 0;
+        if(d1>0 && d2>0) fres = (Math.sqrt((lambda*d1*d2)/(d1+d2))) * 0.5; 
+        const hLOS = (elev[0] + ant) + (d/r) * ((elev[samples] + uav) - (elev[0] + ant));
+        const x = getX(d);
+        const y = getY(hLOS + fres);
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+
+    ctx.beginPath();
+    for(let i=0; i<=samples; i++){
+        const d = r * (i/samples);
+        const d1 = d * 1000;
+        const d2 = (r - d) * 1000;
+        let fres = 0;
+        if(d1>0 && d2>0) fres = (Math.sqrt((lambda*d1*d2)/(d1+d2))) * 0.5; 
+        const hLOS = (elev[0] + ant) + (d/r) * ((elev[samples] + uav) - (elev[0] + ant));
+        const x = getX(d);
+        const y = getY(hLOS - fres);
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]); 
+}
+
+// точки
+const dNorm = Math.min(r, map.distance(c, e.latlng)/1000);
+const x = getX(dNorm);
+const idx = Math.floor((dNorm/r)*samples);
+
+if(idx>=0 && idx<elev.length){
+const hTerrain = elev[idx];
+const hLOS = (elev[0] + ant) + (dNorm / r) * ((elev[samples] + uav) - (elev[0] + ant));
+
+ctx.beginPath();
+ctx.arc(x, getY(hTerrain), 6, 0, Math.PI*2);
+ctx.fillStyle='black';
+ctx.fill();
+
+ctx.beginPath();
+ctx.arc(x, getY(hLOS), 6, 0, Math.PI*2);
+ctx.fillStyle='blue';
+ctx.fill();
+
+const labelHeightTerrain = Math.round(hTerrain) + " м";
+const labelHeightLOS = Math.round(hLOS) + " м";
+ctx.font = 'bold 12px sans-serif';
+const textOffset = 15;
+
+if(getY(hTerrain) < getY(hLOS)){
+ctx.fillStyle='black';
+ctx.textAlign = 'center';
+ctx.fillText(labelHeightTerrain, x, getY(hTerrain) - textOffset);
+ctx.fillStyle='blue';
+ctx.textAlign = 'center';
+ctx.fillText(labelHeightLOS, x, getY(hLOS) + textOffset);
+} else {
+ctx.fillStyle='blue';
+ctx.textAlign = 'center';
+ctx.fillText(labelHeightLOS, x, getY(hLOS) - textOffset);
+ctx.fillStyle='black';
+ctx.textAlign = 'center';
+ctx.fillText(labelHeightTerrain, x, getY(hTerrain) + textOffset);
+}
+
+// Малювання вертикальної пунктирної лінії до низу графіка
+ctx.beginPath();
+ctx.setLineDash([3, 3]);
+ctx.moveTo(x, Math.max(getY(hTerrain), getY(hLOS)) + 6);
+ctx.lineTo(x, canvas.height - padding.bottom);
+ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+ctx.stroke();
+ctx.setLineDash([]);
+
+// Підпис відстані на нижній осі (кілометри + сотні метрів)
+ctx.fillStyle = '#222'; // Темно-чорний
+ctx.font = 'bold 12px sans-serif';
+ctx.fillText(dNorm.toFixed(1) + ' км', x, canvas.height - 14);
+}
+});
+
+// події
+['radius','height','uav_height'].forEach(id=>{
+document.getElementById(id).addEventListener('input', calculate);
+});
+
+// Обробники для галочок (з оновленням кольорів)
+['earth_curve','fresnel','elev_map','high_precision', 'consider_valleys'].forEach(id=>{
+document.getElementById(id).addEventListener('change', () => {
+    updateCheckboxColors();
+    calculate();
+});
+});
+
+// Обробник для галочки лінії азимута (видаляє лінію миттєво при вимкненні)
+document.getElementById('show_azimuth_line').addEventListener('change', (e) => {
+    if (!e.target.checked && azLine) {
+        map.removeLayer(azLine);
+        azLine = null;
+    }
+});
+
+// Логіка відображення слайдера прозорості та його динамічної зміни
+document.getElementById('elev_map').addEventListener('change', (e) => {
+    document.getElementById('elev_opacity_wrapper').style.display = e.target.checked ? 'block' : 'none';
+});
+
+const elevOpacityInput = document.getElementById('elev_opacity');
+
+elevOpacityInput.addEventListener('input', (e) => {
+    document.getElementById('opacity_val').innerText = e.target.value + '%';
+    if (elevOverlay) {
+        elevOverlay.setOpacity(e.target.value / 100);
+    }
+});
+
+elevOpacityInput.addEventListener('wheel', (e) => {
+    e.preventDefault(); 
+    let currentValue = parseInt(elevOpacityInput.value, 10);
+    const step = 5; 
+    
+    if (e.deltaY < 0) {
+        currentValue += step; 
+    } else {
+        currentValue -= step; 
+    }
+    
+    if (currentValue < 0) currentValue = 0;
+    if (currentValue > 100) currentValue = 100;
+    
+    elevOpacityInput.value = currentValue;
+    document.getElementById('opacity_val').innerText = currentValue + '%';
+    
+    if (elevOverlay) {
+        elevOverlay.setOpacity(currentValue / 100);
+    }
+});
+
+map.on('click', async e=>{
+if(!marker){
+marker=L.marker(e.latlng,{draggable:true}).addTo(map);
+marker.on('dragend',calculate);
+}else marker.setLatLng(e.latlng);
+await calculate();
+});
+
+</script>
+</body>
+</html>
