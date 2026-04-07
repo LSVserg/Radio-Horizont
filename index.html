@@ -33,7 +33,7 @@ border-top:2px solid #333;
     border-radius:8px;
     font-size:13px;
     box-shadow: 0 0 10px rgba(0,0,0,0.2);
-    width: 225px; 
+    width: 270px; 
 }
 
 .setting-row {
@@ -117,6 +117,24 @@ border-top:2px solid #333;
 .leaflet-tooltip-top.marker-tooltip:before {
     border-top-color: rgba(255, 255, 255, 0.4);
 }
+
+.coord-copy {
+    color: #0066cc;
+    text-decoration: none;
+    cursor: pointer;
+    margin-left: 8px;
+    font-size: 11px;
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+    transition: all 0.2s;
+}
+
+.coord-copy:hover {
+    background: #e0e0e0;
+    color: #003366;
+}
 </style>
 </head>
 
@@ -159,14 +177,14 @@ border-top:2px solid #333;
 </div>
 
 <hr style="margin: 10px 0;">
-<div id="centerElevation"></div>
-<div id="azimuth"></div>
-<div id="mouseElevation"></div>
+<div id="centerElevation" style="margin-bottom: 4px;"></div>
+<div id="mouseElevation" style="margin-bottom: 4px;"></div>
+<div id="azimuth" style="margin-bottom: 4px;"></div>
 <div id="distanceInfo"></div>
 </div>
 
 <div class="layers">
-<label><input type="radio" name="map" value="sat" checked> Супутник</label><br>
+<label><input type="radio" id="sat_radio" name="map" value="sat" checked> Супутник</label><br>
 <label><input type="radio" name="map" value="osm"> OSM</label>
 </div>
 
@@ -180,12 +198,11 @@ imgBlueMarker.src = 'https://raw.githubusercontent.com/pointhi/leaflet-color-mar
 const imgRedMarker = new Image();
 imgRedMarker.src = 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png';
 
-// Кастомні мітки для карти з цифрами
 const iconBlue1 = L.divIcon({
     className: 'custom-icon',
     html: `<div style="position:relative; width:25px; height:41px;">
              <img src="https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png" style="width:25px;height:41px;position:absolute;top:0;left:0;">
-             <span style="position:absolute; top:6px; width:25px; text-align:center; color:white; font-weight:bold; font-size:14px; font-family:sans-serif; text-shadow: 1px 1px 2px rgba(0,0,0,0.8);">1</span>
+             <span style="position:absolute; top:6px; width:25px; text-align:center; color:red; font-weight:bold; font-size:14px; font-family:sans-serif; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;">1</span>
            </div>`,
     iconSize: [25, 41],
     iconAnchor: [12, 41]
@@ -195,7 +212,7 @@ const iconRed2 = L.divIcon({
     className: 'custom-icon',
     html: `<div style="position:relative; width:25px; height:41px;">
              <img src="https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png" style="width:25px;height:41px;position:absolute;top:0;left:0;">
-             <span style="position:absolute; top:6px; width:25px; text-align:center; color:white; font-weight:bold; font-size:14px; font-family:sans-serif; text-shadow: 1px 1px 2px rgba(0,0,0,0.8);">2</span>
+             <span style="position:absolute; top:6px; width:25px; text-align:center; color:cyan; font-weight:bold; font-size:14px; font-family:sans-serif; text-shadow: 1px 1px 2px rgba(0,0,0,0.8);">2</span>
            </div>`,
     iconSize: [25, 41],
     iconAnchor: [12, 41]
@@ -213,11 +230,16 @@ function updateCheckboxColors() {
 
 updateCheckboxColors();
 
-const map = L.map('map').setView([48.47,37.08], 11);
+// ТУТ ДОДАНО zoomSnap ТА zoomDelta ДЛЯ ТОЧНІШОГО ЗУМУ
+const map = L.map('map', { zoomSnap: 0.5, zoomDelta: 0.5 }).setView([48.47,37.08], 11);
+
+let isGoogleSat = false;
+const esriUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+const googleUrl = 'https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}';
 
 const baseLayers = {
-sat: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19}),
-osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
+    sat: L.tileLayer(esriUrl,{maxZoom:19}),
+    osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png')
 };
 
 const labels = L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}');
@@ -225,14 +247,21 @@ const labels = L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/servic
 baseLayers.sat.addTo(map);
 labels.addTo(map);
 
-// Виправлено: перемикання карт з перестворенням шару надписів
+document.getElementById('sat_radio').addEventListener('click', (e) => {
+    if (e.ctrlKey) {
+        isGoogleSat = !isGoogleSat;
+        baseLayers.sat.setUrl(isGoogleSat ? googleUrl : esriUrl);
+        baseLayers.sat.options.maxZoom = isGoogleSat ? 20 : 19;
+    }
+});
+
 document.querySelectorAll('[name="map"]').forEach(el=>{
     el.onchange = ()=>{
         Object.values(baseLayers).forEach(l=>map.removeLayer(l));
-        map.removeLayer(labels); // Зносимо старі надписи
+        map.removeLayer(labels); 
         baseLayers[el.value].addTo(map);
         if(el.value === 'sat') {
-            labels.addTo(map); // Накладаємо поверх нової карти
+            labels.addTo(map); 
         }
     };
 });
@@ -298,6 +327,21 @@ function hslToRgb(h, s, l) {
     return [Math.round(h2rgb(h + 1/3) * 255), Math.round(h2rgb(h) * 255), Math.round(h2rgb(h - 1/3) * 255)];
 }
 
+window.copyCoords = function(lat, lng, element) {
+    const coordStr = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    navigator.clipboard.writeText(coordStr).then(() => {
+        const originalHtml = element.innerHTML;
+        element.innerHTML = "✅ Скопійовано!";
+        element.style.color = "green";
+        setTimeout(() => {
+            element.innerHTML = originalHtml;
+            element.style.color = "";
+        }, 1200);
+    }).catch(err => {
+        console.error('Не вдалося скопіювати: ', err);
+    });
+};
+
 let marker; 
 let targetMarker = null; 
 let targetMode = 'dynamic'; 
@@ -348,7 +392,6 @@ async function calculate(){
     const rangeStep = useHigh ? 0.1 : 0.2; 
     const azimuthStep = useHigh ? 0.25 : 0.5;
     
-    // БАЗОВА РОЗРАХУНКОВА ДАЛЬНІСТЬ (антена + бпла)
     const baseHorizonDistance = 4 * (Math.sqrt(ant) + Math.sqrt(uav));
 
     let polyData = [];
@@ -374,17 +417,14 @@ async function calculate(){
             let d_target = target.d * 1000;
             let h_target = target.elev + uav;
             
-            // Прапорці для визначення пріоритетів
             let isHorizon = false;
             let isLOS = false;
             let isValley = false;
             let isFresnel = false;
 
-            // 1. Перевірка горизонту
             if (useCurve) {
                 if (target.d > baseHorizonDistance) {
                     isHorizon = true;
-                    // Модифікація: порятунок з-за горизонту, якщо точка висока
                     if (target.elev > centerTerrain) {
                         let hDiff = target.elev - centerTerrain;
                         let modifiedHorizonLimit = 4 * Math.sqrt(ant) + 4 * Math.sqrt(uav + hDiff);
@@ -395,7 +435,6 @@ async function calculate(){
                 }
             }
 
-            // 2. Перевірка рельєфу (перекриття та зони Френеля)
             for (let j = 0; j < i; j++) {
                 let obs = profile[j];
                 let d_obs = obs.d * 1000;
@@ -403,7 +442,7 @@ async function calculate(){
                 
                 if (obs.elev > rayHeightAtObs) {
                     isLOS = true;
-                    break; // Якщо повністю перекрито, далі не перевіряємо Френеля
+                    break; 
                 }
                 
                 if (useFresnel) {
@@ -414,7 +453,6 @@ async function calculate(){
                 }
             }
 
-            // 3. Перевірка долин
             if (isLOS && useValleys) {
                 let terrainLine = centerTerrain + (target.d / r) * (edgeTerrainRaw - centerTerrain);
                 if (target.elev + uav < terrainLine) {
@@ -422,20 +460,18 @@ async function calculate(){
                 }
             }
 
-            // 4. Визначення фінального статусу за ПРІОРИТЕТОМ (чим вище в коді - тим більший пріоритет)
             let status = 'CLEAR';
             
             if (isValley) {
-                status = 'VALLEY'; // Долина найгірший варіант (блакитний)
+                status = 'VALLEY'; 
             } else if (isLOS && useLOS) {
-                status = 'LOS'; // Пряме перекриття горою (червоний) - перекриває горизонт
+                status = 'LOS'; 
             } else if (isHorizon) {
-                status = 'HORIZON'; // Фізичний горизонт землі (фіолетовий)
+                status = 'HORIZON'; 
             } else if (isFresnel) {
-                status = 'FRESNEL'; // Часткове перекриття зони Френеля (помаранчевий)
+                status = 'FRESNEL'; 
             }
 
-            // Формування полігонів
             if (lastStatus === null) {
                 lastStatus = status;
                 start_d = 0;
@@ -596,18 +632,27 @@ canvas.addEventListener('wheel', (e) => {
     const dNorm = Math.min(r, distKm);
     
     const targetX = padding.left + (dNorm/r)*(canvas.width - padding.left - padding.right);
+    const startX = padding.left; 
     
-    if (Math.abs(x - targetX) < 20) {
+    if (Math.abs(x - targetX) < 30) {
         e.preventDefault();
         let uavInput = document.getElementById('uav_height');
         let val = parseInt(uavInput.value, 10);
-        
         if (e.deltaY < 0) val += 1;
         else val -= 1;
         if (val < 0) val = 0;
-        
         uavInput.value = val;
-        
+        updateProfile(); 
+        debouncedCalculate(); 
+    } 
+    else if (Math.abs(x - startX) < 30) {
+        e.preventDefault();
+        let antInput = document.getElementById('height');
+        let val = parseInt(antInput.value, 10);
+        if (e.deltaY < 0) val += 1;
+        else val -= 1;
+        if (val < 0) val = 0;
+        antInput.value = val;
         updateProfile(); 
         debouncedCalculate(); 
     }
@@ -642,9 +687,12 @@ async function updateProfile() {
     if(azLine) map.removeLayer(azLine);
     azLine = L.polyline([c, targetLatLng], {color:'blue',weight:2}).addTo(map);
 
+    const coord1 = `${c.lat.toFixed(5)}, ${c.lng.toFixed(5)}`;
+    const coord2 = `${targetLatLng.lat.toFixed(5)}, ${targetLatLng.lng.toFixed(5)}`;
+
+    document.getElementById('centerElevation').innerHTML = `Висота антени: ${Math.round(centerElev)} м<span class="coord-copy" onclick="copyCoords(${c.lat}, ${c.lng}, this)" title="Натисніть, щоб скопіювати">🔵 ${coord1}</span>`;
+    document.getElementById('mouseElevation').innerHTML = `Висота БПЛА: ${Math.round(targetElev)} м<span class="coord-copy" onclick="copyCoords(${targetLatLng.lat}, ${targetLatLng.lng}, this)" title="Натисніть, щоб скопіювати">🔴 ${coord2}</span>`;
     document.getElementById('azimuth').innerText = "Азимут: " + az.toFixed(1) + "°";
-    document.getElementById('centerElevation').innerText = "Висота антени: " + Math.round(centerElev) + " м";
-    document.getElementById('mouseElevation').innerText = "Висота цілі: " + Math.round(targetElev) + " м"; 
     document.getElementById('distanceInfo').innerText = "Відстань: " + distKm.toFixed(1) + " км";
 
     canvas.width=canvas.clientWidth; canvas.height=canvas.clientHeight;
@@ -828,7 +876,6 @@ map.on('mouseout', () => {
 
 map.on('click', async e=>{
 if(!marker){ 
-    // Використовуємо кастомну мітку з цифрою 1
     marker = L.marker(e.latlng, {draggable:true, icon: iconBlue1}).addTo(map); 
     marker.bindTooltip("", {permanent: true, direction: 'top', className: 'marker-tooltip', offset: [0, -35]});
     
@@ -839,7 +886,6 @@ if(!marker){
     await triggerInstantUpdate(); 
 } else if (targetMode === 'dynamic') {
     targetMode = 'fixed';
-    // Використовуємо кастомну мітку з цифрою 2
     targetMarker = L.marker(e.latlng, {draggable:true, icon: iconRed2}).addTo(map);
     targetMarker.bindTooltip("", {permanent: true, direction: 'top', className: 'marker-tooltip', offset: [0, -35]});
     
@@ -854,17 +900,15 @@ if(!marker){
 }
 });
 
-// Слухачі для цифр: графіка оновлюється миттєво, карта - із затримкою 0.2с
 ['radius','height','uav_height','freq_ghz'].forEach(id=>{ 
     const el = document.getElementById(id);
     el.addEventListener('input', () => {
-        if (el.value < 0) el.value = 0; // жорстке обмеження
+        if (el.value < 0) el.value = 0; 
         updateProfile();
         debouncedCalculate();
     }); 
 });
 
-// Галочки оновлюються миттєво
 ['earth_curve','fresnel','elev_map','high_precision','consider_valleys','direct_visibility'].forEach(id=>{ 
     document.getElementById(id).addEventListener('change', async ()=>{ 
         updateCheckboxColors(); 
@@ -881,7 +925,7 @@ freqGhzInput.addEventListener('wheel', (e) => {
     e.preventDefault(); 
     let currentValue = parseFloat(freqGhzInput.value);
     if (e.deltaY < 0) { currentValue += 0.1; } else { currentValue -= 0.1; }
-    if (currentValue < 0.1) currentValue = 0.1; // для частоти мінімум 0.1
+    if (currentValue < 0.1) currentValue = 0.1;
     freqGhzInput.value = currentValue.toFixed(1);
     updateProfile();
     debouncedCalculate();
