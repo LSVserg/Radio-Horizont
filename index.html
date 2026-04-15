@@ -27,7 +27,7 @@ border-top:2px solid #333;
     position:absolute;
     top:60px;
     left:10px;
-    background:white;
+    background:rgba(255, 255, 255, 0.8);
     padding:12px;
     z-index:1000;
     border-radius:8px;
@@ -80,7 +80,7 @@ border-top:2px solid #333;
     position:absolute;
     top:10px;
     right:10px;
-    background:white;
+    background:rgba(255, 255, 255, 0.8);
     padding:8px;
     border-radius:8px;
     z-index:1000;
@@ -161,7 +161,7 @@ border-top:2px solid #333;
 <hr style="margin: 10px 0;">
 
 <label><input type="checkbox" id="high_precision" checked> Збільшити точність</label>
-<label><input type="checkbox" id="direct_visibility" checked> Пряма видимість</label>
+<label id="lbl_direct_visibility"><input type="checkbox" id="direct_visibility" checked> Пряма видимість</label>
 <label id="lbl_valleys"><input type="checkbox" id="consider_valleys" checked> Завада долини</label>
 <label id="lbl_earth_curve"><input type="checkbox" id="earth_curve" checked> Врахувати горизонт</label>
 
@@ -222,15 +222,16 @@ function updateCheckboxColors() {
     const curveLabel = document.getElementById('lbl_earth_curve');
     const valleysLabel = document.getElementById('lbl_valleys');
     const fresnelLabel = document.getElementById('lbl_fresnel');
+    const directVisLabel = document.getElementById('lbl_direct_visibility');
     
     curveLabel.style.backgroundColor = document.getElementById('earth_curve').checked ? 'rgba(156, 39, 176, 0.3)' : 'transparent'; 
     valleysLabel.style.backgroundColor = document.getElementById('consider_valleys').checked ? 'rgba(0, 230, 230, 0.4)' : 'transparent'; 
     fresnelLabel.style.backgroundColor = document.getElementById('fresnel').checked ? 'rgba(255, 190, 0, 0.5)' : 'transparent';
+    directVisLabel.style.backgroundColor = document.getElementById('direct_visibility').checked ? 'rgba(255, 0, 0, 0.3)' : 'transparent';
 }
 
 updateCheckboxColors();
 
-// ТУТ ДОДАНО zoomSnap ТА zoomDelta ДЛЯ ТОЧНІШОГО ЗУМУ
 const map = L.map('map', { zoomSnap: 0.5, zoomDelta: 0.5 }).setView([48.47,37.08], 11);
 
 let isGoogleSat = false;
@@ -815,23 +816,29 @@ async function updateProfile() {
         ctx.drawImage(imgBlueMarker, getX(0) - mWidth/2, getY(elev[0]+ant) - mHeight, mWidth, mHeight);
         ctx.drawImage(imgRedMarker, x - mWidth/2, getY(hLOSEnd) - mHeight, mWidth, mHeight);
 
+        // Додано відображення висоти антени синім кольором
+        ctx.font = 'bold 12px sans-serif'; 
+        ctx.textAlign = 'left';
+        ctx.fillStyle = 'blue';
+        ctx.fillText(Math.round(ant) + " м", getX(0) + 10, getY(elev[0]+ant) - 5);
+
         ctx.beginPath(); ctx.arc(x, getY(hTerrainEnd), 3, 0, Math.PI*2); ctx.fillStyle='black'; ctx.fill();
         
         ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
         
         if(getY(hTerrainEnd) < getY(hLOSEnd)){ 
             ctx.fillStyle='black'; ctx.fillText(Math.round(hTerrainEnd)+" м", x, getY(hTerrainEnd)-15); 
-            ctx.fillStyle='red'; ctx.fillText(Math.round(hLOSEnd)+" м", x, getY(hLOSEnd)+15); 
+            ctx.fillStyle='red'; ctx.fillText(Math.round(uav)+" м", x, getY(hLOSEnd)+15); 
         } else { 
             ctx.fillStyle='red'; 
             let textY = getY(hLOSEnd) - 25;
             if (textY < padding.top) {
                 ctx.textAlign = x > canvas.width - 60 ? 'right' : 'left';
                 let textX = x > canvas.width - 60 ? x - 15 : x + 15;
-                ctx.fillText(Math.round(hLOSEnd)+" м", textX, getY(hLOSEnd) - 5);
+                ctx.fillText(Math.round(uav)+" м", textX, getY(hLOSEnd) - 5);
                 ctx.textAlign = 'center'; 
             } else {
-                ctx.fillText(Math.round(hLOSEnd)+" м", x, textY); 
+                ctx.fillText(Math.round(uav)+" м", x, textY); 
             }
             ctx.fillStyle='black'; ctx.fillText(Math.round(hTerrainEnd)+" м", x, getY(hTerrainEnd)+15); 
         }
